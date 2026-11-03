@@ -1,0 +1,69 @@
+# TrafficYOLO Configuration
+
+# Model paths
+models:
+  vehicle_detector: "yolov8n.pt"
+  plate_detector: "models/license_plate_detector.pt"
+  tracker_config: "vehicle_bytetrack.yaml"
+  device: "auto"  # "auto", "cuda", or "cpu"
+
+# Inference parameters
+inference:
+  confidence: 0.30
+  recovery_confidence: 0.25
+  image_size: 1280
+
+# Video and output paths
+io:
+  video_path: "videos/3.mp4"
+  output_dir: "outputs"
+  save_video: true
+  save_csv: true
+  csv_filename: "counted_vehicles.csv"
+  video_filename: "counted_video.mp4"
+
+# Counting virtual line coordinates (for 1600 x 1200 resolution)
+counting_line:
+  start: [0, 590]
+  end: [1550, 650]
+  margin: 5
+  max_crossing_frame_gap: 5
+
+# Directional Traffic Signals Configuration
+traffic_signals:
+  mode: "directional" # "directional": match straight vs turn with respective lights
+  straight_light:
+    name: "Đèn Đi Thẳng (Top)"
+    roi: [545, 15, 610, 85]
+    min_pixels: 8
+    target_movement: "straight"
+  right_turn_light:
+    name: "Đèn Rẽ Phải (Right Pole)"
+    roi: [1375, 365, 1435, 410]
+    min_pixels: 6
+    target_movement: "turn_right"
+
+# Legacy single ROI fallback
+traffic_light:
+  roi: [545, 15, 610, 85]
+  min_pixels: 8
+  hsv:
+    saturation_min: 100
+    value_min: 150
+
+# Tracking parameters
+tracking:
+  max_missed_frames: 15
+  max_violation_missed_frames: 15
+  max_track_speed: 40
+  history_len: 20
+  turn_right_threshold: 35.0
+  turn_left_threshold: -35.0
+  map_road_riders_to_motorcycle: false
+
+# Target classes (COCO class ID to name)
+vehicle_classes:
+  2: "car"
+  3: "motorcycle"
+  5: "bus"
+  7: "truck"
