@@ -44,6 +44,12 @@ def parse_args():
         default=None,
         help="Detection confidence threshold.",
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Vehicle detector weights, e.g. yolo26s.pt, yolo26n.pt, yolo26m.pt (overrides config).",
+    )
     return parser.parse_args()
 
 
@@ -56,6 +62,8 @@ def main():
         config["models"]["device"] = args.device
     if args.conf is not None:
         config["inference"]["confidence"] = args.conf
+    if args.model:
+        config["models"]["vehicle_detector"] = args.model
 
     pipeline = TrafficMonitorPipeline(config)
 

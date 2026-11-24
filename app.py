@@ -62,6 +62,26 @@ with st.sidebar:
         help="'auto': Tự nhận diện GPU nếu có, ngược lại dùng CPU",
     )
 
+    MODEL_OPTIONS = {
+        "YOLO26s — cân bằng (khuyên dùng)": "yolo26s.pt",
+        "YOLO26n — nhanh nhất, kém chính xác hơn": "yolo26n.pt",
+        "YOLO26m — chính xác nhất, nên dùng GPU": "yolo26m.pt",
+        "YOLOv8n — model cũ": "yolov8n.pt",
+    }
+    default_model = base_config["models"]["vehicle_detector"]
+    model_labels = list(MODEL_OPTIONS.keys())
+    default_model_idx = next(
+        (i for i, lbl in enumerate(model_labels) if MODEL_OPTIONS[lbl] == default_model), 0
+    )
+    model_label = st.selectbox(
+        "Mô hình nhận diện xe",
+        options=model_labels,
+        index=default_model_idx,
+        help="Model lớn hơn nhận diện tốt hơn (xe nhỏ, xe bị che khuất) nhưng chậm hơn. "
+        "Trọng số chưa có sẽ được tải tự động ở lần chạy đầu.",
+    )
+    vehicle_model_choice = MODEL_OPTIONS[model_label]
+
     conf_threshold = st.slider(
         "Ngưỡng tin cậy nhận diện (Confidence)",
         min_value=0.10,
@@ -366,6 +386,7 @@ if start_btn and video_source_path:
     # Prepare runtime config with Multi-Signal & Directional tracking
     run_config = base_config.copy()
     run_config["models"]["device"] = get_default_device(device_option)
+    run_config["models"]["vehicle_detector"] = vehicle_model_choice
     run_config["inference"]["confidence"] = conf_threshold
     run_config["counting_line"]["start"] = [int(line_x1), int(line_y1)]
     run_config["counting_line"]["end"] = [int(line_x2), int(line_y2)]

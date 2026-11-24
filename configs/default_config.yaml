@@ -2,7 +2,10 @@
 
 # Model paths
 models:
-  vehicle_detector: "yolov8n.pt"
+  # YOLO26s: ~48.6 mAP COCO (vs 37.3 for yolov8n), NMS-free, CPU-optimized.
+  # Alternatives: "yolo26n.pt" (fastest), "yolo11s.pt", "yolo26m.pt" (most accurate, needs GPU).
+  vehicle_detector: "yolo26s.pt"
+  fallback_vehicle_detector: "yolov8n.pt"  # used if the main weights cannot be loaded
   plate_detector: "models/license_plate_detector.pt"
   tracker_config: "vehicle_bytetrack.yaml"
   device: "auto"  # "auto", "cuda", or "cpu"
@@ -12,6 +15,15 @@ inference:
   confidence: 0.30
   recovery_confidence: 0.25
   image_size: 1280
+  half: true  # FP16 on GPU (ignored on CPU)
+
+# Temporal smoothing / voting to reduce flicker-induced errors
+stabilization:
+  class_vote_window: 15        # frames of class history per track (majority vote)
+  signal_vote_window: 5        # frames of traffic-light history (majority vote)
+  plate_sample_interval: 3     # try to read a plate every N frames per track
+  plate_max_reads: 4           # max OCR attempts per track (OCR is expensive on CPU)
+  plate_min_box_height: 60     # only sample plates when the vehicle box is at least this tall (px)
 
 # Video and output paths
 io:

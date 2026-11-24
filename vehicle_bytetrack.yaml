@@ -1,7 +1,7 @@
 tracker_type: bytetrack
-track_high_thresh: 0.25
-track_low_thresh: 0.1
-new_track_thresh: 0.25
-track_buffer: 15
+track_high_thresh: 0.25   # first-stage association threshold
+track_low_thresh: 0.1     # second-stage (low-score) association keeps occluded vehicles alive
+new_track_thresh: 0.35    # stricter: avoid spawning new IDs from flickering low-conf boxes
+track_buffer: 30          # ~1.2s at 25fps: survive occlusion behind buses/trucks without ID switch
 match_thresh: 0.8
 fuse_score: True

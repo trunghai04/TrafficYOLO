@@ -21,6 +21,7 @@ from .traffic_light import (
     evaluate_directional_violation,
 )
 from .trajectory import compute_movement_vector, classify_vehicle_direction
+from .stabilization import PlateVoter, SignalSmoother, TrackClassVoter
 
 SHORT_VEHICLE_TYPES = {
     "motorcycle": "MOTO",
@@ -30,6 +31,7 @@ SHORT_VEHICLE_TYPES = {
 }
 GREEN = (50, 220, 50)
 RED = (0, 0, 255)
+YELLOW = (0, 215, 255)
 
 
 def _patch_yolov5_compat():
@@ -68,10 +70,20 @@ class TrafficMonitorPipeline:
 
         self.vehicle_classes = {int(k): v for k, v in config["vehicle_classes"].items()}
 
-        # Load main vehicle detector
+        # Load main vehicle detector (fall back to legacy weights if the upgraded model is unavailable)
         model_path = config["models"]["vehicle_detector"]
+        fallback_path = config["models"].get("fallback_vehicle_detector")
         print(f"Loading YOLO vehicle model from: {model_path} (Device: {self.device})")
-        self.model = YOLO(model_path)
+        try:
+            self.model = YOLO(model_path)
+        except Exception as e:
+            if not fallback_path or fallback_path == model_path:
+                raise
+            print(f"[WARN] Could not load '{model_path}' ({e}). Falling back to '{fallback_path}'.")
+            model_path = fallback_path
+            self.model = YOLO(model_path)
+        self.vehicle_model_path = model_path
+        self.use_half = bool(config["inference"].get("half", True)) and self.device != "cpu"
         self.recovery_model = None
 
         # Load license plate detector
@@ -86,6 +98,37 @@ class TrafficMonitorPipeline:
                 print(f"[WARN] Failed to load plate detector ({e}). Proceeding without plate crops.")
         else:
             print(f"[INFO] Plate detector not found at {plate_model_path}. Proceeding without plate crops.")
+
+    def _sample_plate(
+        self,
+        raw_frame: np.ndarray,
+        vehicle_box,
+        track_id: int,
+        plate_voter: PlateVoter,
+        use_gpu_ocr: bool,
+        force: bool = False,
+    ) -> None:
+        """Detect the plate in one vehicle crop and feed the OCR read to the voter.
+
+        OCR (the expensive step) only runs when the plate crop is at least ~as large
+        as the best one seen for this track, so later, blurrier/farther views do not
+        waste CPU or pollute the vote.
+        """
+        h, w = raw_frame.shape[:2]
+        x1, y1, x2, y2 = clamp_box(vehicle_box, w, h)
+        pad = 15
+        crop = raw_frame[max(0, y1 - pad):min(h, y2 + pad), max(0, x1 - pad):min(w, x2 + pad)]
+        if crop.size == 0:
+            return
+        plate_img, _det_conf, area = detect_license_plate_crop(
+            crop, self.plate_model, device=self.device, return_info=True
+        )
+        if plate_img is None:
+            return
+        if not force and not plate_voter.is_better_crop(track_id, area):
+            return
+        text, ocr_conf = recognize_license_plate_text(plate_img, use_gpu=use_gpu_ocr)
+        plate_voter.add(track_id, text, ocr_conf, crop_area=area)
 
     def run(
         self,
@@ -185,6 +228,17 @@ class TrafficMonitorPipeline:
         events = []
         frame_number = 0
 
+        # Temporal stabilization (voting over frames)
+        stab_cfg = self.config.get("stabilization", {})
+        class_voter = TrackClassVoter(window=int(stab_cfg.get("class_vote_window", 15)))
+        signal_smoother = SignalSmoother(window=int(stab_cfg.get("signal_vote_window", 5)))
+        plate_voter = PlateVoter()
+        plate_interval = int(stab_cfg.get("plate_sample_interval", 3))
+        plate_max_reads = int(stab_cfg.get("plate_max_reads", 4))
+        plate_min_box_h = int(stab_cfg.get("plate_min_box_height", 60))
+        plate_calls_per_frame = 2  # bound CPU cost of plate detection per frame
+        use_gpu_ocr = self.device != "cpu"
+
         print(f"Starting traffic analysis on: {video_path.name} ({width}x{height}, ~{total_frames} frames)...")
 
         map_riders = bool(self.config.get("tracking", {}).get("map_road_riders_to_motorcycle", False))
@@ -198,6 +252,7 @@ class TrafficMonitorPipeline:
             conf=self.config["inference"]["confidence"],
             imgsz=self.config["inference"]["image_size"],
             device=self.device,
+            half=self.use_half,
             classes=track_classes,
             persist=True,
             stream=True,
@@ -207,11 +262,12 @@ class TrafficMonitorPipeline:
         for result in results:
             frame_number += 1
             seen_track_ids = set()
+            plate_calls_left = plate_calls_per_frame
             raw_frame = result.orig_img.copy()
             frame = raw_frame.copy()
 
-            # Classify all directional signals
-            signal_states = classify_multiple_signals(raw_frame, signals_dict)
+            # Classify all directional signals, then majority-vote over recent frames
+            signal_states = signal_smoother.update(classify_multiple_signals(raw_frame, signals_dict))
             straight_state = signal_states.get("straight_light", "UNKNOWN")
             right_turn_state = signal_states.get("right_turn_light", "UNKNOWN")
             signal_state = straight_state  # primary signal state for fallback
@@ -220,6 +276,7 @@ class TrafficMonitorPipeline:
             if boxes is not None and len(boxes) > 0:
                 xyxy = boxes.xyxy.cpu().tolist()
                 raw_class_ids = boxes.cls.int().cpu().tolist()
+                confs = boxes.conf.cpu().tolist() if boxes.conf is not None else [1.0] * len(raw_class_ids)
                 track_ids = boxes.id.int().cpu().tolist() if boxes.id is not None else [-1] * len(raw_class_ids)
 
                 # Nighttime / Low-light rider mapping: only map person (class 0) to motorcycle if explicitly enabled
@@ -239,6 +296,12 @@ class TrafficMonitorPipeline:
                     else:
                         class_ids.append(cid)
 
+                # Per-track class voting: stops car<->truck / moto<->bicycle flicker, which
+                # otherwise breaks track continuity checks and double-counts vehicles.
+                class_ids = [
+                    class_voter.update(tid, cid, cf) if cid in self.vehicle_classes else cid
+                    for tid, cid, cf in zip(track_ids, class_ids, confs)
+                ]
                 # Recover oversized boxes if detected
                 needs_recovery = any(
                     cid in self.vehicle_classes
@@ -252,7 +315,7 @@ class TrafficMonitorPipeline:
                 )
                 if needs_recovery:
                     if self.recovery_model is None:
-                        self.recovery_model = YOLO(self.config["models"]["vehicle_detector"])
+                        self.recovery_model = YOLO(self.vehicle_model_path)
                     xyxy = recover_oversized_vehicle_boxes(
                         self.recovery_model,
                         raw_frame,
@@ -284,6 +347,8 @@ class TrafficMonitorPipeline:
                     ):
                         tracked_vehicles.pop(track_id, None)
                         previous_side.pop(track_id, None)
+                        plate_voter.forget(track_id)
+                        track_plates.pop(track_id, None)
                         if previous_track["violation"]:
                             violation_ids.discard(track_id)
                         previous_track = None
@@ -316,6 +381,22 @@ class TrafficMonitorPipeline:
                         track_history[track_id].append((center_x, center_y))
                         if len(track_history[track_id]) > 25:
                             track_history[track_id].pop(0)
+
+                    # Multi-frame plate sampling while the vehicle approaches the stop line
+                    # (closest to camera = largest, sharpest plate). Reads are voted later.
+                    approaching = current_side == "below" or track_id in pending_crossings
+                    if (
+                        approaching
+                        and plate_calls_left > 0
+                        and self.plate_model is not None
+                        and (y2 - y1) >= plate_min_box_h
+                        and plate_voter.should_sample(track_id, frame_number, plate_interval, plate_max_reads)
+                    ):
+                        plate_calls_left -= 1
+                        plate_voter.mark_sampled(track_id, frame_number)
+                        self._sample_plate(raw_frame, vehicle_box, track_id, plate_voter, use_gpu_ocr)
+                        if plate_voter.has_result(track_id):
+                            track_plates[track_id] = plate_voter.result(track_id)[0]
 
                     # Register vehicle crossing the line into pending evaluations
                     standard_cross = (old_side == "below" and current_side == "above")
@@ -354,13 +435,11 @@ class TrafficMonitorPipeline:
                             "raw_crossing_frame": raw_frame.copy(),
                             "signal_states_at_cross": signal_states.copy(),
                         }
-                        # Pre-read plate for vehicle crossing if not already captured
-                        if track_id not in track_plates and self.plate_model is not None and crop_img.size > 0:
-                            p_zoom = detect_license_plate_crop(crop_img, self.plate_model, device=self.device)
-                            if p_zoom is not None:
-                                p_num, _ = recognize_license_plate_text(p_zoom, use_gpu=(self.device != "cpu"))
-                                if p_num:
-                                    track_plates[track_id] = p_num
+                        # Pre-read plate at crossing if voting has not produced one yet
+                        if not plate_voter.has_result(track_id) and self.plate_model is not None and crop_img.size > 0:
+                            self._sample_plate(raw_frame, vehicle_box, track_id, plate_voter, use_gpu_ocr, force=True)
+                            if plate_voter.has_result(track_id):
+                                track_plates[track_id] = plate_voter.result(track_id)[0]
 
                     # Evaluate pending crossings
                     is_red_light_violation = False
@@ -505,9 +584,11 @@ class TrafficMonitorPipeline:
                         evidence_path = event_dir / "evidence.jpg"
 
                         plate_zoom = detect_license_plate_crop(evidence_crop, self.plate_model, device=self.device)
+                        if plate_voter.has_result(track_id):
+                            track_plates[track_id] = plate_voter.result(track_id)[0]
                         plate_str = track_plates.get(track_id, "")
                         if not plate_str and plate_zoom is not None:
-                            plate_str, _ = recognize_license_plate_text(plate_zoom, use_gpu=(self.device != "cpu"))
+                            plate_str, _ = recognize_license_plate_text(plate_zoom, use_gpu=use_gpu_ocr)
                             if plate_str:
                                 track_plates[track_id] = plate_str
 
@@ -547,6 +628,8 @@ class TrafficMonitorPipeline:
                     tracked_vehicles.pop(track_id)
                     previous_side.pop(track_id, None)
                     track_history.pop(track_id, None)
+                    class_voter.forget(track_id)
+                    plate_voter.forget(track_id)
                     if state["violation"]:
                         violation_ids.discard(track_id)
 

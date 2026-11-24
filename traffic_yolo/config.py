@@ -38,7 +38,8 @@ def load_config(config_path: Path | str | None = None) -> Dict[str, Any]:
     # Default fallback values
     default_cfg = {
         "models": {
-            "vehicle_detector": "yolov8n.pt",
+            "vehicle_detector": "yolo26s.pt",
+            "fallback_vehicle_detector": "yolov8n.pt",
             "plate_detector": "models/license_plate_detector.pt",
             "tracker_config": "vehicle_bytetrack.yaml",
             "device": "auto",
@@ -47,6 +48,14 @@ def load_config(config_path: Path | str | None = None) -> Dict[str, Any]:
             "confidence": 0.30,
             "recovery_confidence": 0.25,
             "image_size": 1280,
+            "half": True,
+        },
+        "stabilization": {
+            "class_vote_window": 15,
+            "signal_vote_window": 5,
+            "plate_sample_interval": 3,
+            "plate_max_reads": 4,
+            "plate_min_box_height": 60,
         },
         "io": {
             "video_path": "videos/3.mp4",

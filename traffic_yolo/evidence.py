@@ -66,10 +66,16 @@ def detect_license_plate_crop(
     conf: float = 0.20,
     device: str = "cpu",
     zoom_factor: int = 5,
-) -> Optional[np.ndarray]:
-    """Detect, upscale, and enhance a license plate crop from a vehicle image."""
+    return_info: bool = False,
+):
+    """Detect, upscale, and enhance a license plate crop from a vehicle image.
+
+    Returns the enhanced plate image (or None). With ``return_info=True`` returns
+    ``(enhanced_plate | None, detection_conf, raw_plate_area_px)``.
+    """
+    empty = (None, 0.0, 0) if return_info else None
     if plate_model is None or vehicle_crop is None or vehicle_crop.size == 0:
-        return None
+        return empty
 
     patch_plate_model_compat(plate_model)
 
@@ -83,10 +89,10 @@ def detect_license_plate_crop(
         )
     except Exception as exc:
         print(f"[WARN] Error during license plate detection: {exc}")
-        return None
+        return empty
 
     if not results or results[0].boxes is None or len(results[0].boxes) == 0:
-        return None
+        return empty
 
     boxes = results[0].boxes
     confidences = boxes.conf.cpu().tolist()
@@ -114,14 +120,16 @@ def detect_license_plate_crop(
     x2, y2 = max(1, min(w, x2 + pad_x)), max(1, min(h, y2 + pad_y))
 
     if x2 <= x1 or y2 <= y1:
-        return None
+        return empty
 
     plate_crop = vehicle_crop[y1:y2, x1:x2]
     if plate_crop.size == 0:
-        return None
+        return empty
 
     # Apply enhancement pipeline
     enhanced_color, _ = enhance_license_plate(plate_crop, zoom_factor=zoom_factor)
+    if return_info:
+        return enhanced_color, float(confidences[best_index]), int((x2 - x1) * (y2 - y1))
     return enhanced_color
 
 
